@@ -256,20 +256,6 @@ services:
 
    # AGREGADO: SOPORTE DE BACKUPS DE TERCEROS PARA CASSANDRA SEED (GCS)
   
-  cassandra-medusa:
-    image: spotify/cassandra-medusa:latest
-    container_name: cassandra-medusa
-    volumes:
-      - cassandra_seed_data:/var/lib/cassandra:ro
-      - ./medusa_config:/etc/cassandra-medusa
-      - ./cloud-secrets:/credentials:ro
-    networks:
-      - mongo-net
-    command: ["tail", "-f", "/dev/null"]
-    depends_on:
-      cassandra-seed:
-        condition: service_healthy
-
   esop-backup:
     image: instaclustr/esop:latest
     container_name: esop-backup
@@ -291,17 +277,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
-      # TAREA 1: Medusa cada 10 minutos
-      - "ofelia.job-exec.medusa_job.schedule=@every 10m"
-      - "ofelia.job-exec.medusa_job.container=cassandra-medusa"
-      - "ofelia.job-exec.medusa_job.command=medusa backup --backup-name=medusa-auto"
-
-      # TAREA 2: Esop cada 15 minutos 
+      # TAREA: Esop cada 15 minutos 
       - "ofelia.job-exec.esop_job.schedule=@every 15m"
       - "ofelia.job-exec.esop_job.container=esop-backup"
       - "ofelia.job-exec.esop_job.command=esop backup --storage-provider=gcs --bucket-name=mathews-coffee-bucket --cluster-name=mathews_cluster --cassandra-data-dir=/var/lib/cassandra/data"
     depends_on:
-      - cassandra-medusa
       - esop-backup
 
 networks:
