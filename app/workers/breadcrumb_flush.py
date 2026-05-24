@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import uuid
 from datetime import datetime, timezone
 
 from app.cassandra import cassandra_execute
@@ -86,17 +88,78 @@ async def start_flush_worker(app) -> None:
     Iniciado como asyncio.create_task() en el lifespan.
     """
     logger.info("Breadcrumb flush worker started (interval=%ds)", FLUSH_INTERVAL)
-
+    # Ejecutar la primera iteración inmediatamente (no esperar el primer sleep)
     while True:
         try:
-            await asyncio.sleep(FLUSH_INTERVAL)
+            # 1) Drivers explícitos marcados como available
+            driver_ids = set(await app.state.redis.smembers("available_drivers") or [])
 
-            driver_ids = await app.state.redis.smembers("available_drivers")
+            # 2) Fallback: descubrir streams pendientes via SCAN de keys driver:*:breadcrumbs
+            try:
+                async for key in app.state.redis.scan_iter(match="driver:*:breadcrumbs"):
+                    # key esperado: "driver:{driver_id}:breadcrumbs"
+                    try:
+                        parts = key.split(":")
+                        if len(parts) >= 3:
+                            driver_ids.add(parts[1])
+                    except Exception:
+                        # si el formato es inesperado, saltarlo
+                        continue
+            except Exception as scan_err:
+                logger.debug("Redis SCAN error (continuing): %s", scan_err)
+
             if not driver_ids:
+                # nada por procesar; dormir y seguir
+                await asyncio.sleep(FLUSH_INTERVAL)
                 continue
 
-            for driver_id in driver_ids:
-                await flush_driver(driver_id, app.state.redis, app.state.cassandra)
+            logger.debug("Flush worker discovered %d drivers to check", len(driver_ids))
+
+            for driver_id in list(driver_ids):
+                lock_key = f"lock:flush:driver:{driver_id}"
+                token = f"{os.getpid()}-{uuid.uuid4().hex}"
+                try:
+                    # Verificar si el stream tiene entries para evitar trabajo innecesario
+                    stream_key = f"driver:{driver_id}:breadcrumbs"
+                    try:
+                        length = await app.state.redis.xlen(stream_key)
+                    except Exception:
+                        # si el comando no está disponible, fallback a XRANGE con count=1
+                        entries = await app.state.redis.xrange(stream_key, count=1)
+                        length = len(entries)
+
+                    if length == 0:
+                        continue
+
+                    # Intentar adquirir lock antes de procesar para evitar que
+                    # múltiples réplicas procesen el mismo stream simultáneamente.
+                    lock_ttl_ms = max(10000, FLUSH_INTERVAL * 1000 * 2)
+                    acquired = await app.state.redis.set(lock_key, token, nx=True, px=lock_ttl_ms)
+                    if not acquired:
+                        # Otro worker ya está procesando este driver
+                        logger.debug("Skipping driver %s — lock held by another worker", driver_id)
+                        continue
+
+                    # Procesar el driver (tenemos el lock)
+                    await flush_driver(driver_id, app.state.redis, app.state.cassandra)
+
+                except Exception as e:
+                    logger.error("Error flushing driver %s: %s", driver_id, e)
+                finally:
+                    # Liberar lock únicamente si aún lo poseemos (compare-and-del)
+                    try:
+                        # Script seguro para liberar solo si el token coincide
+                        release_script = (
+                            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                            "return redis.call('del', KEYS[1]) else return 0 end"
+                        )
+                        await app.state.redis.eval(release_script, 1, lock_key, token)
+                    except Exception:
+                        # No fatal — si no se pudo liberar el lock, expirará por TTL
+                        logger.debug("Failed to release lock for driver %s (will expire)", driver_id)
+
+            # Esperar al final del ciclo
+            await asyncio.sleep(FLUSH_INTERVAL)
 
         except asyncio.CancelledError:
             logger.info("Breadcrumb flush worker stopped")
