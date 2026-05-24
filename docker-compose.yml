@@ -13,6 +13,7 @@ services:
     container_name: mathews-cassandra-seed
     ports:
       - "9042:9042"
+      - "7199:7199" # EXPLICITO: Requerido para que Medusa ejecute nodetool vía JMX
     environment:
       - CASSANDRA_CLUSTER_NAME=mathews_cluster
       - CASSANDRA_SEEDS=mathews-cassandra-seed
@@ -22,6 +23,7 @@ services:
       - MAX_HEAP_SIZE=512M
       - HEAP_NEWSIZE=100M
       - JVM_OPTS=-Xms512M -Xmx512M
+      - LOCAL_JMX=no # PERMISIVO: Permite a Medusa interactuar desde su propio contenedor
     volumes:
       - cassandra_seed_data:/var/lib/cassandra
     healthcheck:
@@ -106,7 +108,6 @@ services:
     networks:
       - mongo-net
 
-  # Shard 1: Primario
   shard1-primary:
     image: mongo:latest
     container_name: shard1-primary
@@ -127,7 +128,6 @@ services:
     networks:
       - mongo-net
 
-  # Shard 1: Secundario
   shard1-secondary:
     image: mongo:latest
     container_name: shard1-secondary
@@ -186,7 +186,6 @@ services:
       - shard1-secondary
       - shard1-arbiter
 
-  # Inicialización del Cluster
   mongo-init:
     image: mongo:latest
     container_name: mongo-init
@@ -234,7 +233,6 @@ services:
         echo 'Cluster inicializado correctamente.'
       "
 
-  # Backup
   backup:
     image: weseek/mongodb-awesome-backup:latest
     container_name: mongo_backup
@@ -255,6 +253,56 @@ services:
       - mongo-net
     depends_on:
       - mongos
+
+   # AGREGADO: SOPORTE DE BACKUPS DE TERCEROS PARA CASSANDRA SEED (GCS)
+  
+  cassandra-medusa:
+    image: spotify/cassandra-medusa:latest
+    container_name: cassandra-medusa
+    volumes:
+      - cassandra_seed_data:/var/lib/cassandra:ro
+      - ./medusa_config:/etc/cassandra-medusa
+      - ./cloud-secrets:/credentials:ro
+    networks:
+      - mongo-net
+    command: ["tail", "-f", "/dev/null"]
+    depends_on:
+      cassandra-seed:
+        condition: service_healthy
+
+  esop-backup:
+    image: instaclustr/esop:latest
+    container_name: esop-backup
+    volumes:
+      - cassandra_seed_data:/var/lib/cassandra:ro
+      - ./cloud-secrets:/credentials:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/credentials/gcp_key.json
+    networks:
+      - mongo-net
+    command: ["sleep", "infinity"]
+    depends_on:
+      cassandra-seed:
+        condition: service_healthy
+
+  scheduler:
+    image: mcuadros/ofelia:latest
+    container_name: docker-cron
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      # TAREA 1: Medusa cada 10 minutos
+      - "ofelia.job-exec.medusa_job.schedule=@every 10m"
+      - "ofelia.job-exec.medusa_job.container=cassandra-medusa"
+      - "ofelia.job-exec.medusa_job.command=medusa backup --backup-name=medusa-auto"
+
+      # TAREA 2: Esop cada 15 minutos 
+      - "ofelia.job-exec.esop_job.schedule=@every 15m"
+      - "ofelia.job-exec.esop_job.container=esop-backup"
+      - "ofelia.job-exec.esop_job.command=esop backup --storage-provider=gcs --bucket-name=mathews-coffee-bucket --cluster-name=mathews_cluster --cassandra-data-dir=/var/lib/cassandra/data"
+    depends_on:
+      - cassandra-medusa
+      - esop-backup
 
 networks:
   mongo-net:
