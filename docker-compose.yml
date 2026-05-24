@@ -13,7 +13,6 @@ services:
     container_name: mathews-cassandra-seed
     ports:
       - "9042:9042"
-      - "7199:7199" # EXPLICITO: Requerido para que Medusa ejecute nodetool vía JMX
     environment:
       - CASSANDRA_CLUSTER_NAME=mathews_cluster
       - CASSANDRA_SEEDS=mathews-cassandra-seed
@@ -23,7 +22,6 @@ services:
       - MAX_HEAP_SIZE=512M
       - HEAP_NEWSIZE=100M
       - JVM_OPTS=-Xms512M -Xmx512M
-      - LOCAL_JMX=no # PERMISIVO: Permite a Medusa interactuar desde su propio contenedor
     volumes:
       - cassandra_seed_data:/var/lib/cassandra
     healthcheck:
@@ -233,7 +231,7 @@ services:
         echo 'Cluster inicializado correctamente.'
       "
 
-  backup:
+  mongo-backup:
     image: weseek/mongodb-awesome-backup:latest
     container_name: mongo_backup
     restart: unless-stopped
@@ -254,35 +252,30 @@ services:
     depends_on:
       - mongos
 
-   # AGREGADO: SOPORTE DE BACKUPS DE TERCEROS PARA CASSANDRA SEED (GCS)
-  
-  esop-backup:
-    image: instaclustr/esop:latest
-    container_name: esop-backup
-    volumes:
-      - cassandra_seed_data:/var/lib/cassandra:ro
-      - ./cloud-secrets:/credentials:ro
+  # INTEGRADO: CONTENEDOR DE TERCEROS PARA BACKUPS DE CASSANDRA HACIA GCS
+  cassandra-backup:
+    image: offen/docker-volume-backup:v2
+    container_name: cassandra_gcs_backup
+    restart: unless-stopped
     environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/credentials/gcp_key.json
+      # Formato del archivo comprimido con la fecha y hora exacta de ejecución
+      - BACKUP_FILENAME=backup-cassandra-%Y-%m-%d-%H-%M-%S.tar.gz
+      - GCS_BUCKET=mathews-coffee-bucket
+      - GCS_PROJECT_ID=mathews-coffe
+      # Ruta interna del contenedor donde se lee la llave de Google Cloud
+      - GOOGLE_APPLICATION_CREDENTIALS=/keys/gcp-key.json
+      # AUTOMATIZACIÓN: Configurado exactamente cada 10 minutos
+      - BACKUP_CRON=*/10 * * * *
+    volumes:
+      # Acceso de solo lectura al volumen de datos de tu Cassandra Seed
+      - cassandra_seed_data:/backup/cassandra-data:ro
+      # Reutilizamos la misma ruta local de credenciales que ya usas en MongoDB
+      - ./credentials/gcp-key.json:/keys/gcp-key.json:ro
     networks:
       - mongo-net
-    command: ["sleep", "infinity"]
     depends_on:
       cassandra-seed:
         condition: service_healthy
-
-  scheduler:
-    image: mcuadros/ofelia:latest
-    container_name: docker-cron
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    labels:
-      # TAREA: Esop cada 15 minutos 
-      - "ofelia.job-exec.esop_job.schedule=@every 15m"
-      - "ofelia.job-exec.esop_job.container=esop-backup"
-      - "ofelia.job-exec.esop_job.command=esop backup --storage-provider=gcs --bucket-name=mathews-coffee-bucket --cluster-name=mathews_cluster --cassandra-data-dir=/var/lib/cassandra/data"
-    depends_on:
-      - esop-backup
 
 networks:
   mongo-net:
