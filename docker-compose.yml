@@ -8,13 +8,22 @@ services:
     networks:
       - mongo-net
 
-  cassandra:
+  cassandra-seed:
     image: cassandra:4.1
-    container_name: cassandra
+    container_name: mathews-cassandra-seed
     ports:
       - "9042:9042"
     environment:
       - CASSANDRA_CLUSTER_NAME=mathews_cluster
+      - CASSANDRA_SEEDS=mathews-cassandra-seed
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=100M
+      - JVM_OPTS=-Xms512M -Xmx512M
+    volumes:
+      - cassandra_seed_data:/var/lib/cassandra
     healthcheck:
       test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
       interval: 30s
@@ -23,35 +32,115 @@ services:
     networks:
       - mongo-net
 
+  cassandra-node2:
+    image: cassandra:4.1
+    container_name: mathews-cassandra-node2
+    ports:
+      - "9142:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=mathews_cluster
+      - CASSANDRA_SEEDS=mathews-cassandra-seed
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=100M
+      - JVM_OPTS=-Xms512M -Xmx512M
+    volumes:
+      - cassandra_node2_data:/var/lib/cassandra
+    depends_on:
+      cassandra-seed:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - mongo-net
+
+  cassandra-node3:
+    image: cassandra:4.1
+    container_name: mathews-cassandra-node3
+    ports:
+      - "9242:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=mathews_cluster
+      - CASSANDRA_SEEDS=mathews-cassandra-seed
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=100M
+      - JVM_OPTS=-Xms512M -Xmx512M
+    volumes:
+      - cassandra_node3_data:/var/lib/cassandra
+    depends_on:
+      cassandra-node2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    networks:
+      - mongo-net
 
   configsvr1:
     image: mongo:latest
     container_name: configsvr1
-    command: ["mongod", "--configsvr", "--replSet", "configrs", "--bind_ip_all", "--port", "27017"]
+    command:
+      [
+        "mongod",
+        "--configsvr",
+        "--replSet",
+        "configrs",
+        "--bind_ip_all",
+        "--port",
+        "27017",
+      ]
     volumes:
       - configsvr1_data:/data/db
     ports:
       - "27019:27017"
     networks:
       - mongo-net
- 
-  # Shard 1: Primario 
+
+  # Shard 1: Primario
   shard1-primary:
     image: mongo:latest
     container_name: shard1-primary
-    command: ["mongod", "--shardsvr", "--replSet", "shard1rs", "--bind_ip_all", "--port", "27017"]
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard1rs",
+        "--bind_ip_all",
+        "--port",
+        "27017",
+      ]
     volumes:
       - shard1_primary_data:/data/db
     ports:
       - "27018:27017"
     networks:
       - mongo-net
- 
-  # Shard 1: Secundario 
+
+  # Shard 1: Secundario
   shard1-secondary:
     image: mongo:latest
     container_name: shard1-secondary
-    command: ["mongod", "--shardsvr", "--replSet", "shard1rs", "--bind_ip_all", "--port", "27017"]
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard1rs",
+        "--bind_ip_all",
+        "--port",
+        "27017",
+      ]
     volumes:
       - shard1_secondary_data:/data/db
     networks:
@@ -60,16 +149,33 @@ services:
   shard1-arbiter:
     image: mongo:latest
     container_name: shard1-arbiter
-    command: ["mongod", "--shardsvr", "--replSet", "shard1rs", "--bind_ip_all", "--port", "27017"]
+    command:
+      [
+        "mongod",
+        "--shardsvr",
+        "--replSet",
+        "shard1rs",
+        "--bind_ip_all",
+        "--port",
+        "27017",
+      ]
     volumes:
       - shard1_arbiter_data:/data/arb
     networks:
       - mongo-net
- 
+
   mongos:
     image: mongo:latest
     container_name: mongos
-    command: ["mongos", "--configdb", "configrs/configsvr1:27017", "--bind_ip_all", "--port", "27017"]
+    command:
+      [
+        "mongos",
+        "--configdb",
+        "configrs/configsvr1:27017",
+        "--bind_ip_all",
+        "--port",
+        "27017",
+      ]
     ports:
       - "27017:27017"
     networks:
@@ -79,7 +185,7 @@ services:
       - shard1-primary
       - shard1-secondary
       - shard1-arbiter
- 
+
   # Inicialización del Cluster
   mongo-init:
     image: mongo:latest
@@ -93,7 +199,7 @@ services:
       bash -c "
         echo 'Esperando que los nodos estén listos...' &&
         sleep 15 &&
- 
+
         echo '1/3 Inicializando Config Server RS...' &&
         mongosh --host configsvr1 --port 27017 --eval '
           rs.initiate({
@@ -103,7 +209,7 @@ services:
           })
         ' &&
         sleep 5 &&
- 
+
         echo '2/3 Inicializando Shard 1 RS (primary + secondary + arbiter)...' &&
         mongosh --host shard1-primary --port 27017 --eval '
           rs.initiate({
@@ -116,7 +222,7 @@ services:
           })
         ' &&
         sleep 15 &&
- 
+
         echo '3/3 Registrando shard y habilitando sharding en mathews_coffee_delivery...' &&
         mongosh --host mongos --port 27017 --eval '
           db.adminCommand({ setDefaultRWConcern: 1, defaultWriteConcern: { w: 1 } });
@@ -124,10 +230,10 @@ services:
           sh.enableSharding(\"mathews_coffee_delivery\");
           sh.shardCollection(\"mathews_coffee_delivery.orders\", { region: 1 });
         ' &&
- 
+
         echo 'Cluster inicializado correctamente.'
       "
- 
+
   # Backup
   backup:
     image: weseek/mongodb-awesome-backup:latest
@@ -149,14 +255,16 @@ services:
       - mongo-net
     depends_on:
       - mongos
- 
+
 networks:
   mongo-net:
     driver: bridge
- 
+
 volumes:
+  cassandra_seed_data:
+  cassandra_node2_data:
+  cassandra_node3_data:
   configsvr1_data:
   shard1_primary_data:
   shard1_secondary_data:
   shard1_arbiter_data:
- 
